@@ -3,11 +3,17 @@
 # Checkpoints are not downloaded here (see doc/setup.md "2. Getting Checkpoints").
 set -euo pipefail
 
-ENV_NAME="sam3d-objects"
-
 echo "╔══╣ Setup: SAM 3D Objects (STARTING) ╠══╗"
 
 cd "$(dirname "$0")"
+REPO_DIR="$(pwd)"
+
+# micromamba binary, package cache and environment are all kept inside the repository,
+# so that they survive container re-creation (only colcon_ws/src is bind-mounted, see docs/issue.md)
+MICROMAMBA_DIR="${REPO_DIR}/.micromamba"
+MICROMAMBA="${MICROMAMBA_DIR}/bin/micromamba"
+ENV_PREFIX="${MICROMAMBA_DIR}/envs/sam3d-objects"
+export MAMBA_ROOT_PREFIX="${MICROMAMBA_DIR}"
 
 # ---------------------------------------------------------------------------
 # Prerequisites
@@ -21,60 +27,79 @@ if ! command -v nvidia-smi > /dev/null 2>&1; then
     echo "WARNING: nvidia-smi not found. A NVIDIA GPU (>= 32GB VRAM) is required to run inference."
 fi
 
+# curl/tar/bzip2: micromamba download, git: git+ dependencies (pytorch3d, MoGe, gsplat)
+missing=()
+for cmd in curl tar bzip2 git; do
+    command -v "${cmd}" > /dev/null 2>&1 || missing+=("${cmd}")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+    echo "ERROR: missing commands: ${missing[*]} (e.g. sudo apt install ${missing[*]})" >&2
+    exit 1
+fi
+
 # Build CUDA extensions (e.g. pytorch3d) even when no GPU is visible,
 # otherwise they fail at runtime with "Not compiled with GPU support".
 export FORCE_CUDA=1
 
-# Remove Python 3.12 paths added by ROS / ~/.bashrc (see docs/issue.md)
-unset PYTHONPATH
+# Remove Python 3.12 paths and system CUDA 12.8 / ROS libraries added by ROS / ~/.bashrc (see docs/issue.md)
+unset PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH
 export PYTHONNOUSERSITE=1
 
-# Select micromamba (preferred) or conda
-if command -v micromamba > /dev/null 2>&1; then
-    CONDA_CMD=micromamba
-    eval "$(micromamba shell hook --shell bash)"
-elif command -v conda > /dev/null 2>&1; then
-    CONDA_CMD=conda
-    eval "$(conda shell.bash hook)"
-else
-    echo "ERROR: micromamba or conda not found. See docs/issue.md." >&2
-    exit 1
+# ---------------------------------------------------------------------------
+# micromamba (always used, even if conda is installed; no `shell init`, see docs/issue.md)
+# ---------------------------------------------------------------------------
+mkdir -p "${MICROMAMBA_DIR}"
+# Keep colcon / rosdep from crawling the environment (the repository is inside colcon_ws/src)
+touch "${MICROMAMBA_DIR}/COLCON_IGNORE"
+if [ ! -x "${MICROMAMBA}" ]; then
+    echo "Installing micromamba to ${MICROMAMBA}"
+    curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest \
+        | tar -xj -C "${MICROMAMBA_DIR}" bin/micromamba
 fi
+echo "micromamba: ${MICROMAMBA} ($("${MICROMAMBA}" --version)), root prefix: ${MAMBA_ROOT_PREFIX}"
+eval "$("${MICROMAMBA}" shell hook --shell bash)"
 
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-if ${CONDA_CMD} env list --json | grep -q "/envs/${ENV_NAME}\""; then
-    echo "Environment '${ENV_NAME}' already exists, skipping creation."
-elif [ "${CONDA_CMD}" = micromamba ]; then
-    micromamba create -y -n "${ENV_NAME}" -f environments/default.yml
+if [ -x "${ENV_PREFIX}/bin/python" ]; then
+    echo "Environment '${ENV_PREFIX}' already exists, skipping creation."
 else
-    conda env create -n "${ENV_NAME}" -f environments/default.yml
+    micromamba create -y -p "${ENV_PREFIX}" -f environments/default.yml
 fi
 
 # Activation hooks may reference unset variables
 set +u
-${CONDA_CMD} activate "${ENV_NAME}"
+micromamba activate "${ENV_PREFIX}"
 set -u
 
-# Isolate PYTHONPATH / CUDA_HOME on every activation (see docs/issue.md)
+# Isolate PYTHONPATH / LD_LIBRARY_PATH / LIBRARY_PATH / CUDA_HOME on every activation (see docs/issue.md)
 mkdir -p "${CONDA_PREFIX}/etc/conda/activate.d" "${CONDA_PREFIX}/etc/conda/deactivate.d"
 cat > "${CONDA_PREFIX}/etc/conda/activate.d/sam3d_env.sh" << 'EOF'
-export _SAM3D_OLD_PYTHONPATH="${PYTHONPATH}"
-export _SAM3D_OLD_CUDA_HOME="${CUDA_HOME}"
-unset PYTHONPATH
+for _sam3d_var in PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH CUDA_HOME; do
+    if [ -n "${!_sam3d_var+x}" ]; then export "_SAM3D_OLD_${_sam3d_var}=${!_sam3d_var}"; fi
+    unset "${_sam3d_var}"
+done
+unset _sam3d_var
 export PYTHONNOUSERSITE=1
 export CUDA_HOME="${CONDA_PREFIX}"
 EOF
 cat > "${CONDA_PREFIX}/etc/conda/deactivate.d/sam3d_env.sh" << 'EOF'
-[ -n "${_SAM3D_OLD_PYTHONPATH}" ] && export PYTHONPATH="${_SAM3D_OLD_PYTHONPATH}"
-if [ -n "${_SAM3D_OLD_CUDA_HOME}" ]; then export CUDA_HOME="${_SAM3D_OLD_CUDA_HOME}"; else unset CUDA_HOME; fi
-unset _SAM3D_OLD_PYTHONPATH _SAM3D_OLD_CUDA_HOME PYTHONNOUSERSITE
+unset CUDA_HOME PYTHONNOUSERSITE
+for _sam3d_var in PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH CUDA_HOME; do
+    _sam3d_old="_SAM3D_OLD_${_sam3d_var}"
+    if [ -n "${!_sam3d_old+x}" ]; then export "${_sam3d_var}=${!_sam3d_old}"; unset "${_sam3d_old}"; fi
+done
+unset _sam3d_var _sam3d_old
 EOF
 export CUDA_HOME="${CONDA_PREFIX}"
 
 echo "python: $(which python) ($(python --version))"
 echo "nvcc:   $(which nvcc)"
+case "$(which python)" in
+    "${CONDA_PREFIX}"/bin/python) ;;
+    *) echo "ERROR: python is not in ${CONDA_PREFIX}" >&2; exit 1 ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Python dependencies
