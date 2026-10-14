@@ -1,0 +1,24 @@
+# CUDA 12.8 toolchain for Blackwell GPUs (RTX 5090, sm_120), used by install.sh instead of default.yml.
+# torch 2.7.1+cu128 requires nvcc of the same major/minor family to build pytorch3d / gsplat (see docs/issue.md)
+name: sam3d-objects
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.0
+  - pip=25.0.1
+  - setuptools=75.8.2
+  - wheel=0.45.1
+  - c-compiler=1.7.0
+  - cxx-compiler=1.7.0
+  - cuda-version=12.8
+  - cuda-nvcc=12.8.93
+  - cuda-cudart-dev
+  - cuda-nvrtc-dev
+  - cuda-nvtx-dev
+  - cuda-cccl
+  - cuda-profiler-api
+  - libcublas-dev
+  - libcusparse-dev
+  - libcusolver-dev
+  - libcurand-dev
+  - libcufft-dev

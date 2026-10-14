@@ -1,6 +1,8 @@
 #!/bin/bash
 # Setup script for SAM 3D Objects (see doc/setup.md, docs/issue.md)
 # Checkpoints are not downloaded here (see doc/setup.md "2. Getting Checkpoints").
+# Installs torch 2.7.1+cu128 instead of upstream torch 2.5.1+cu121, which has no kernels for
+# Blackwell GPUs (RTX 5090, sm_120) and fails with "no kernel image is available" (see docs/issue.md).
 set -euo pipefail
 
 echo "╔══╣ Setup: SAM 3D Objects (STARTING) ╠══╗"
@@ -40,6 +42,8 @@ fi
 # Build CUDA extensions (e.g. pytorch3d) even when no GPU is visible,
 # otherwise they fail at runtime with "Not compiled with GPU support".
 export FORCE_CUDA=1
+# Target GPU architecture for the CUDA extensions (12.0: RTX 5090)
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
 
 # Remove Python 3.12 paths and system CUDA 12.8 / ROS libraries added by ROS / ~/.bashrc (see docs/issue.md)
 unset PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH
@@ -63,9 +67,14 @@ eval "$("${MICROMAMBA}" shell hook --shell bash)"
 # Environment
 # ---------------------------------------------------------------------------
 if [ -x "${ENV_PREFIX}/bin/python" ]; then
+    # An environment created from upstream default.yml (CUDA 12.1) cannot be upgraded in place (see docs/issue.md)
+    if ! "${ENV_PREFIX}/bin/nvcc" --version 2> /dev/null | grep -q "release 12.8"; then
+        echo "ERROR: '${ENV_PREFIX}' is not a CUDA 12.8 environment. Remove it and re-run: rm -rf '${ENV_PREFIX}'" >&2
+        exit 1
+    fi
     echo "Environment '${ENV_PREFIX}' already exists, skipping creation."
 else
-    micromamba create -y -p "${ENV_PREFIX}" -f environments/default.yml
+    micromamba create -y -p "${ENV_PREFIX}" -f environments/cu128.yml
 fi
 
 # Activation hooks may reference unset variables
@@ -105,12 +114,16 @@ esac
 # Python dependencies
 # ---------------------------------------------------------------------------
 # pytorch/cuda dependencies
-export PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu121"
-python -m pip install -e '.[dev]'
+# pypi.ngc.nvidia.com (upstream doc/setup.md) is omitted: it is unresolvable from this network and
+# makes pip retry 5 times (--retries default) on every request (see docs/issue.md)
+export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu128"
+# Pin gradio here as well, otherwise MoGe pulls gradio 6.x (+ hf-gradio), which is downgraded
+# by '.[inference]' and leaves a dependency conflict (hf-gradio requires gradio-client>=2.0)
+python -m pip install -e '.[dev]' "$(grep '^gradio==' requirements.inference.txt)"
 python -m pip install -e '.[p3d]'  # pytorch3d dependency on pytorch is broken, 2-step install
 
 # inference dependencies
-export PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html"
+export PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.7.1_cu128.html"
 python -m pip install -e '.[inference]'
 
 # Patch hydra (https://github.com/facebookresearch/hydra/pull/2863)
@@ -127,15 +140,23 @@ print(f"torch:  {torch.__version__} ({torch.__file__}), cuda {torch.version.cuda
 errors = []
 if not torch.__file__.startswith(prefix):
     errors.append(f"torch is loaded from outside the environment: {torch.__file__}")
-if torch.version.cuda != "12.1":
-    errors.append(f"torch CUDA version is {torch.version.cuda}, expected 12.1")
-if not torch.cuda.is_available():
+if torch.version.cuda != "12.8":
+    errors.append(f"torch CUDA version is {torch.version.cuda}, expected 12.8")
+if "sm_120" not in torch.cuda.get_arch_list():
+    errors.append(f"torch has no sm_120 (Blackwell) kernels: {torch.cuda.get_arch_list()}")
+if torch.cuda.is_available():
+    # Run actual kernels: "no kernel image is available" only shows up here (see docs/issue.md)
+    import pytorch3d.ops, spconv.pytorch, gsplat, kaolin
+    x = torch.randn(64, 64, device="cuda")
+    (x @ x).sum().item()
+    print(f"GPU:    {torch.cuda.get_device_name(0)} (sm_{''.join(map(str, torch.cuda.get_device_capability(0)))}) OK")
+else:
     print("WARNING: torch.cuda.is_available() is False (no GPU visible).")
 if errors:
     sys.exit("ERROR: " + "\nERROR: ".join(errors))
 EOF
-if ! nvcc --version | grep -q "release 12.1"; then
-    echo "ERROR: nvcc is not CUDA 12.1 ($(which nvcc))." >&2
+if ! nvcc --version | grep -q "release 12.8"; then
+    echo "ERROR: nvcc is not CUDA 12.8 ($(which nvcc))." >&2
     exit 1
 fi
 

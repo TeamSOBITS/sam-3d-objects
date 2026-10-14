@@ -1,2 +1,4 @@
 __pycache__
 .micromamba/
+/tmp/
+/splat.ply
