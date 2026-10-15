@@ -50,7 +50,7 @@ unset PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH
 export PYTHONNOUSERSITE=1
 
 # ---------------------------------------------------------------------------
-# micromamba (always used, even if conda is installed; no `shell init`, see docs/issue.md)
+# micromamba (always used, even if conda is installed; no `shell init`, ~/.bashrc is set up at the end, see docs/issue.md)
 # ---------------------------------------------------------------------------
 mkdir -p "${MICROMAMBA_DIR}"
 # Keep colcon / rosdep from crawling the environment (the repository is inside colcon_ws/src)
@@ -159,5 +159,27 @@ if ! nvcc --version | grep -q "release 12.8"; then
     echo "ERROR: nvcc is not CUDA 12.8 ($(which nvcc))." >&2
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# ~/.bashrc (see docs/issue.md)
+# ---------------------------------------------------------------------------
+# Only the micromamba hook is loaded on every shell; the environment is activated on demand with `sam3d`,
+# because activating it unsets PYTHONPATH / LD_LIBRARY_PATH and would break ROS in every new terminal.
+# The block is replaced on every run, so it follows the repository if it is moved.
+BASHRC="${HOME}/.bashrc"
+touch "${BASHRC}"
+sed -i --follow-symlinks '/^# >>> sam3d-objects >>>$/,/^# <<< sam3d-objects <<<$/d' "${BASHRC}"
+cat >> "${BASHRC}" << EOF
+# >>> sam3d-objects >>>
+# Added by ${REPO_DIR}/install.sh (re-running it rewrites this block)
+export MAMBA_ROOT_PREFIX="${MICROMAMBA_DIR}"
+if [ -x "\${MAMBA_ROOT_PREFIX}/bin/micromamba" ]; then
+    eval "\$("\${MAMBA_ROOT_PREFIX}/bin/micromamba" shell hook --shell bash)"
+fi
+# cd to the repository and activate the environment
+sam3d() { cd "${REPO_DIR}" && micromamba activate sam3d-objects; }
+# <<< sam3d-objects <<<
+EOF
+echo "Added micromamba hook and 'sam3d' command to ${BASHRC} (open a new shell, then run: sam3d)"
 
 echo "╚══╣ Setup: SAM 3D Objects (FINISHED) ╠══╝"
