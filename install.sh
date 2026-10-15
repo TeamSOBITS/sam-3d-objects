@@ -126,6 +126,10 @@ python -m pip install -e '.[p3d]'  # pytorch3d dependency on pytorch is broken, 
 export PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.7.1_cu128.html"
 python -m pip install -e '.[inference]'
 
+# ultralytics (YOLO); installed after the pinned dependencies so that pip's default
+# "only-if-needed" upgrade strategy keeps torch 2.7.1+cu128 / opencv-python 4.9.0.80
+python -m pip install ultralytics
+
 # Patch hydra (https://github.com/facebookresearch/hydra/pull/2863)
 python ./patching/hydra
 
@@ -133,10 +137,11 @@ python ./patching/hydra
 # Verify (see docs/issue.md)
 # ---------------------------------------------------------------------------
 python - << 'EOF'
-import os, sys, torch
+import os, sys, torch, ultralytics
 prefix = os.environ["CONDA_PREFIX"]
 print(f"python: {sys.version.split()[0]}")
 print(f"torch:  {torch.__version__} ({torch.__file__}), cuda {torch.version.cuda}")
+print(f"ultralytics: {ultralytics.__version__}")
 errors = []
 if not torch.__file__.startswith(prefix):
     errors.append(f"torch is loaded from outside the environment: {torch.__file__}")
